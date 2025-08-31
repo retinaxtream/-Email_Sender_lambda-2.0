@@ -305,19 +305,8 @@ function generateEmailSubject(vars) {
 }
 
 function getEmailHTML(vars) {
-  // ✅ guard against undefined
   const photos = Array.isArray(vars.topPhotos) ? vars.topPhotos : [];
-  const photosGrid = photos
-    .map(
-      (photo, index) => `
-        <div style="position: relative; overflow: hidden; border-radius: 16px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); transition: transform 0.3s ease;">
-          <img src="${photo.url}" alt="${photo.alt}" style="width: 100%; height: 200px; object-fit: cover; display: block;" />
-          <div style="position: absolute; bottom: 0; left: 0; right: 0; background: linear-gradient(to top, rgba(0,0,0,0.7), transparent); padding: 12px; color: white;">
-            <span style="font-size: 12px; font-weight: 600;">${photo.similarity}% Match</span>
-          </div>
-        </div>`
-    )
-    .join('');
+  const firstPhoto = photos.length > 0 ? photos[0] : null;
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -326,64 +315,72 @@ function getEmailHTML(vars) {
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Your Photos from ${vars.businessName}</title>
   <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+    * { box-sizing: border-box; }
     body, table, td, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
-    table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
-    img { -ms-interpolation-mode: bicubic; border: 0; outline: none; text-decoration: none; }
-    @media only screen and (max-width: 600px) {
+    table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; border-collapse: collapse; }
+    img { -ms-interpolation-mode: bicubic; border: 0; outline: none; text-decoration: none; max-width: 100%; height: auto; }
+    a { text-decoration: none; }
+    
+    @media only screen and (max-width: 640px) {
+      .container { width: 100% !important; margin: 0 !important; }
+      .mobile-padding { padding: 20px !important; }
+      .mobile-text-lg { font-size: 28px !important; line-height: 1.3 !important; }
+      .mobile-text-sm { font-size: 14px !important; }
       .mobile-hide { display: none !important; }
       .mobile-center { text-align: center !important; }
-      .container { width: 100% !important; max-width: 100% !important; }
-      .photo-grid { grid-template-columns: 1fr !important; }
-      h1 { font-size: 32px !important; }
-      .cta-button { width: 100% !important; text-align: center !important; }
+      .photo-container { max-width: 100% !important; }
+      .photo-container img { width: 100% !important; height: auto !important; }
+    }
+    
+    @media (prefers-color-scheme: light) {
+      .dark-mode-only { display: none !important; }
     }
   </style>
 </head>
-<body style="margin:0; padding:0; font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; background-color:#0a0a0a; color:#ffffff;">
-  <div style="display:none; max-height:0; overflow:hidden;">
-    ${vars.guestName}, your photos from ${vars.businessName} are ready! We found ${vars.photoCount} amazing shots.
+<body style="margin: 0; padding: 0; font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: linear-gradient(135deg, #0a0a0a 0%, #1a1a1a 100%); color: #ffffff; line-height: 1.6;">
+  <div style="display: none; max-height: 0; overflow: hidden; font-size: 1px; line-height: 1px; color: transparent;">
+    ${vars.guestName}, your ${vars.photoCount} photo${vars.photoCount > 1 ? 's' : ''} from ${vars.eventName} ${vars.photoCount > 1 ? 'are' : 'is'} ready for download! 📸✨
   </div>
 
-  <table border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color:#0a0a0a;">
+  <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="background: linear-gradient(135deg, #0a0a0a 0%, #1a1a1a 100%); min-height: 100vh;">
     <tr>
-      <td align="center" style="padding:0;">
-        <table class="container" border="0" cellpadding="0" cellspacing="0" width="600" style="max-width:600px; background-color:#0a0a0a;">
+      <td align="center" style="padding: 0;">
+        <table class="container" role="presentation" border="0" cellpadding="0" cellspacing="0" width="600" style="max-width: 600px; margin: 0 auto; background: transparent;">
 
           <!-- Header -->
           <tr>
-            <td style="padding:40px 32px 20px 32px;">
-              <table width="100%" border="0" cellpadding="0" cellspacing="0">
+            <td class="mobile-padding" style="padding: 40px 40px 20px 40px;">
+              <table role="presentation" width="100%" border="0" cellpadding="0" cellspacing="0">
                 <tr>
-                  <td align="center" style="padding-bottom:30px;">
+                  <td align="center" style="padding-bottom: 40px;">
                     ${
                       vars.businessLogo
-                        ? `<img src="${vars.businessLogo}" alt="${vars.businessName}" style="max-height:60px; max-width:200px;"/>`
-                        : `<h2 style="margin:0; font-size:28px; font-weight:700; color:#ffffff; letter-spacing:-0.5px;">${vars.businessName}</h2>`
+                        ? `<img src="${vars.businessLogo}" alt="${vars.businessName}" style="max-height: 50px; max-width: 200px; filter: brightness(1.1);"/>`
+                        : `<h2 style="margin: 0; font-size: 26px; font-weight: 700; color: #ffffff; letter-spacing: -0.02em; font-family: 'JetBrains Mono', monospace;">${vars.businessName}</h2>`
                     }
                   </td>
                 </tr>
               </table>
 
-              <!-- Hero -->
-              <table width="100%" border="0" cellpadding="0" cellspacing="0">
+              <!-- Status Badge -->
+              <table role="presentation" width="100%" border="0" cellpadding="0" cellspacing="0">
                 <tr>
-                  <td align="center" style="padding:20px 0;">
-                    <div style="display:inline-block; background:linear-gradient(135deg,#6366f1,#8b5cf6); padding:3px; border-radius:100px;">
-                      <div style="background:#0a0a0a; border-radius:100px; padding:12px 24px;">
-                        <span style="color:#a78bfa; font-size:14px; font-weight:600; text-transform:uppercase; letter-spacing:1px;">
-                          ${vars.photoCount} Photos Found
-                        </span>
-                      </div>
+                  <td align="center" style="padding-bottom: 24px;">
+                    <div style="display: inline-flex; align-items: center; background: linear-gradient(90deg, #00ff8820, #00ff8810); border: 1px solid #00ff8830; padding: 8px 20px; border-radius: 50px; font-family: 'JetBrains Mono', monospace;">
+                      <span style="width: 8px; height: 8px; background: #00ff88; border-radius: 50%; margin-right: 8px; animation: pulse 2s infinite;"></span>
+                      <span style="color: #00ff88; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">
+                        ${vars.photoCount} PHOTOS READY
+                      </span>
                     </div>
                   </td>
                 </tr>
                 <tr>
-                  <td align="center" style="padding:10px 0 30px 0;">
-                    <h1 style="margin:0; font-size:48px; font-weight:700; color:#ffffff; line-height:1.2; letter-spacing:-1px;">
-                      Hey ${vars.guestName},<br/>
-                      <span style="background:linear-gradient(135deg,#6366f1,#8b5cf6); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text;">
-                        Your memories are ready!
+                  <td align="center" style="padding-bottom: 32px;">
+                    <h1 class="mobile-text-lg" style="margin: 0; font-size: 42px; font-weight: 700; color: #ffffff; line-height: 1.2; letter-spacing: -0.02em;">
+                      Hi ${vars.guestName}, 👋<br/>
+                      <span style="background: linear-gradient(90deg, #00ff88, #00d4ff); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; display: inline-block;">
+                        Your memories await!
                       </span>
                     </h1>
                   </td>
@@ -392,34 +389,59 @@ function getEmailHTML(vars) {
             </td>
           </tr>
 
-          <!-- Event Info -->
+
+          <!-- Photo Preview -->
+          ${
+            firstPhoto
+              ? `<tr>
+                   <td class="mobile-padding" style="padding: 0 40px 32px 40px;">
+                     <table role="presentation" width="100%" border="0" cellpadding="0" cellspacing="0">
+                       <tr>
+                         <td style="padding-bottom: 24px;">
+                           <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+                             <span style="font-size: 12px; font-weight: 500; color: #888888; text-transform: uppercase; letter-spacing: 0.8px; font-family: 'JetBrains Mono', monospace;">PREVIEW</span>
+                             <div style="flex: 1; height: 1px; background: linear-gradient(90deg, #333, transparent);"></div>
+                           </div>
+                           <h3 style="margin: 0; color: #ffffff; font-size: 18px; font-weight: 600;">Your Best Match</h3>
+                         </td>
+                       </tr>
+                       <tr>
+                         <td align="center">
+                           <div class="photo-container" style="max-width: 400px; margin: 0 auto; width: 100%;">
+                             <div style="background: linear-gradient(145deg, #1e1e1e, #2a2a2a); border-radius: 16px; overflow: hidden; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4); position: relative; width: 100%;">
+                               <img src="${firstPhoto.url}" alt="${firstPhoto.alt}" style="width: 100%; height: auto; min-height: 250px; max-height: 350px; object-fit: cover; display: block;" />
+                               <div style="position: absolute; top: 16px; right: 16px; background: rgba(0, 0, 0, 0.85); backdrop-filter: blur(12px); padding: 8px 16px; border-radius: 25px; border: 1px solid rgba(0, 255, 136, 0.3);">
+                                 <span style="color: #00ff88; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; font-family: 'JetBrains Mono', monospace;">
+                                   ${firstPhoto.similarity}% MATCH
+                                 </span>
+                               </div>
+                             </div>
+                           </div>
+                         </td>
+                       </tr>
+                     </table>
+                   </td>
+                 </tr>`
+              : ''
+          }
+
+          <!-- CTA Section -->
           <tr>
-            <td style="padding:0 32px;">
-              <table width="100%" border="0" cellpadding="0" cellspacing="0" style="background:linear-gradient(135deg,#1a1a1a,#262626); border-radius:24px; overflow:hidden;">
+            <td class="mobile-padding" style="padding: 0 40px 40px 40px;">
+              <table role="presentation" width="100%" border="0" cellpadding="0" cellspacing="0" style="background: linear-gradient(145deg, #1a1a1a, #252525); border: 1px solid #333; border-radius: 16px; overflow: hidden;">
                 <tr>
-                  <td style="padding:32px;">
-                    <table width="100%" border="0" cellpadding="0" cellspacing="0">
+                  <td style="padding: 40px; text-align: center;">
+                    <table role="presentation" width="100%" border="0" cellpadding="0" cellspacing="0">
                       <tr>
-                        <td>
-                          <p style="margin:0 0 8px 0; color:#a1a1aa; font-size:14px; text-transform:uppercase; letter-spacing:0.5px;">Event</p>
-                          <h3 style="margin:0 0 20px 0; color:#ffffff; font-size:24px; font-weight:600;">${vars.eventName}</h3>
-                        </td>
-                      </tr>
-                      <tr>
-                        <td>
-                          <table width="100%" border="0" cellpadding="0" cellspacing="0">
+                        <td align="center">
+                          <h3 style="margin: 0 0 16px 0; color: #ffffff; font-size: 20px; font-weight: 600;">Ready to download?</h3>
+                          <p style="margin: 0 0 32px 0; color: #aaaaaa; font-size: 14px; line-height: 1.5; max-width: 400px; margin-left: auto; margin-right: auto;">Access your complete photo gallery and download high-resolution versions</p>
+                          <table role="presentation" border="0" cellpadding="0" cellspacing="0" align="center">
                             <tr>
-                              <td width="33%" style="text-align:center; padding:0 10px;">
-                                <div style="color:#6366f1; font-size:32px; font-weight:700; margin-bottom:4px;">${vars.photoCount}</div>
-                                <div style="color:#a1a1aa; font-size:12px; text-transform:uppercase;">Total Photos</div>
-                              </td>
-                              <td width="33%" style="text-align:center; padding:0 10px; border-left:1px solid #333; border-right:1px solid #333;">
-                                <div style="color:#8b5cf6; font-size:32px; font-weight:700; margin-bottom:4px;">${vars.bestSimilarity}%</div>
-                                <div style="color:#a1a1aa; font-size:12px; text-transform:uppercase;">Best Match</div>
-                              </td>
-                              <td width="33%" style="text-align:center; padding:0 10px;">
-                                <div style="color:#a78bfa; font-size:32px; font-weight:700; margin-bottom:4px;">${vars.processedDate}</div>
-                                <div style="color:#a1a1aa; font-size:12px; text-transform:uppercase;">Date</div>
+                              <td align="center" style="border-radius: 50px; background: linear-gradient(90deg, #00ff88, #00d4ff); box-shadow: 0 10px 30px rgba(0, 255, 136, 0.3);">
+                                <a href="${vars.galleryUrl}" style="display: block; color: #000000; font-weight: 600; padding: 18px 40px; font-size: 16px; letter-spacing: 0.3px; text-transform: uppercase; text-decoration: none; font-family: 'JetBrains Mono', monospace; border-radius: 50px;">
+                                  OPEN GALLERY →
+                                </a>
                               </td>
                             </tr>
                           </table>
@@ -432,95 +454,61 @@ function getEmailHTML(vars) {
             </td>
           </tr>
 
-          <!-- Photo Preview (shows if we have photos) -->
-          ${
-            photos.length
-              ? `<tr>
-                   <td style="padding:40px 32px;">
-                     <h3 style="margin:0 0 24px 0; color:#ffffff; font-size:20px; font-weight:600; text-align:center;">Preview of Your Photos</h3>
-                     <div class="photo-grid" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); gap:16px;">
-                       ${photosGrid}
-                     </div>
-                   </td>
-                 </tr>`
-              : ''
-          }
-
-          <!-- CTA -->
-          <tr>
-            <td style="padding:0 32px 40px 32px;">
-              <table width="100%" border="0" cellpadding="0" cellspacing="0">
-                <tr>
-                  <td align="center">
-                    <a href="${vars.galleryUrl}" class="cta-button" style="display:inline-block; background:linear-gradient(135deg,#6366f1,#8b5cf6); color:#ffffff; text-decoration:none; padding:18px 48px; border-radius:100px; font-size:16px; font-weight:600; letter-spacing:0.5px; box-shadow:0 20px 40px rgba(99,102,241,0.3); transition:all 0.3s ease;">
-                      View Your Complete Gallery →
-                    </a>
-                    <p style="margin:16px 0 0 0; color:#71717a; font-size:14px;">Download all your high-resolution photos</p>
-                  </td>
-                </tr>
-              </table>
-            </td>
-          </tr>
-
           <!-- Business Info -->
           <tr>
-            <td style="padding:40px 32px; border-top:1px solid #262626;">
-              <table width="100%" border="0" cellpadding="0" cellspacing="0">
+            <td class="mobile-padding" style="padding: 0 40px 40px 40px;">
+              <table role="presentation" width="100%" border="0" cellpadding="0" cellspacing="0">
                 <tr>
-                  <td align="center">
-                    <h3 style="margin:0 0 20px 0; color:#ffffff; font-size:18px; font-weight:600;">
-                      Captured by ${vars.businessName}
-                    </h3>
+                  <td align="center" style="border-top: 1px solid #333; padding-top: 32px;">
+                    <h4 style="margin: 0 0 12px 0; color: #ffffff; font-size: 16px; font-weight: 600;">
+                      📸 Captured by ${vars.businessName}
+                    </h4>
                     ${
                       vars.businessDescription
-                        ? `<p style="margin:0 0 20px 0; color:#a1a1aa; font-size:14px; line-height:1.6; max-width:400px;">${vars.businessDescription}</p>`
+                        ? `<p style="margin: 0 0 24px 0; color: #aaaaaa; font-size: 14px; line-height: 1.6; max-width: 400px;">${vars.businessDescription}</p>`
                         : ''
                     }
 
-                    <table border="0" cellpadding="0" cellspacing="0" style="margin:20px auto;">
-                      <tr>
-                        ${
-                          vars.businessPhone
-                            ? `<td style="padding:0 20px;"><a href="tel:${vars.businessPhone}" style="color:#6366f1; text-decoration:none; font-size:14px;">📞 ${vars.businessPhone}</a></td>`
-                            : ''
-                        }
-                        ${
-                          vars.businessEmail
-                            ? `<td style="padding:0 20px;"><a href="mailto:${vars.businessEmail}" style="color:#6366f1; text-decoration:none; font-size:14px;">✉️ ${vars.businessEmail}</a></td>`
-                            : ''
-                        }
-                      </tr>
-                    </table>
+                    <div style="display: flex; justify-content: center; gap: 24px; margin: 20px 0; flex-wrap: wrap;">
+                      ${
+                        vars.businessPhone
+                          ? `<a href="tel:${vars.businessPhone}" style="color: #00ff88; font-size: 13px; font-weight: 500; display: flex; align-items: center; gap: 6px;">📞 ${vars.businessPhone}</a>`
+                          : ''
+                      }
+                      ${
+                        vars.businessEmail
+                          ? `<a href="mailto:${vars.businessEmail}" style="color: #00d4ff; font-size: 13px; font-weight: 500; display: flex; align-items: center; gap: 6px;">✉️ ${vars.businessEmail}</a>`
+                          : ''
+                      }
+                    </div>
 
                     ${
                       (vars.socialLinks?.facebook ||
                         vars.socialLinks?.instagram ||
                         vars.socialLinks?.twitter)
-                        ? `<table border="0" cellpadding="0" cellspacing="0" style="margin:24px auto;">
-                             <tr>
-                               ${
-                                 vars.socialLinks.facebook
-                                   ? `<td style="padding:0 8px;"><a href="${vars.socialLinks.facebook}" style="display:inline-block;"><img src="https://img.icons8.com/ios-filled/50/6366f1/facebook-new.png" alt="Facebook" width="32" height="32"/></a></td>`
-                                   : ''
-                               }
-                               ${
-                                 vars.socialLinks.instagram
-                                   ? `<td style="padding:0 8px;"><a href="${vars.socialLinks.instagram}" style="display:inline-block;"><img src="https://img.icons8.com/ios-filled/50/6366f1/instagram-new.png" alt="Instagram" width="32" height="32"/></a></td>`
-                                   : ''
-                               }
-                               ${
-                                 vars.socialLinks.twitter
-                                   ? `<td style="padding:0 8px;"><a href="${vars.socialLinks.twitter}" style="display:inline-block;"><img src="https://img.icons8.com/ios-filled/50/6366f1/twitter.png" alt="Twitter" width="32" height="32"/></a></td>`
-                                   : ''
-                               }
-                             </tr>
-                           </table>`
+                        ? `<div style="display: flex; justify-content: center; gap: 16px; margin: 24px 0;">
+                             ${
+                               vars.socialLinks.facebook
+                                 ? `<a href="${vars.socialLinks.facebook}" style="display: flex; align-items: center; justify-content: center; width: 40px; height: 40px; background: linear-gradient(145deg, #1a1a1a, #252525); border: 1px solid #333; border-radius: 50%; transition: all 0.3s ease;"><img src="https://img.icons8.com/fluency/48/facebook-new.png" alt="Facebook" width="20" height="20"/></a>`
+                                 : ''
+                             }
+                             ${
+                               vars.socialLinks.instagram
+                                 ? `<a href="${vars.socialLinks.instagram}" style="display: flex; align-items: center; justify-content: center; width: 40px; height: 40px; background: linear-gradient(145deg, #1a1a1a, #252525); border: 1px solid #333; border-radius: 50%; transition: all 0.3s ease;"><img src="https://img.icons8.com/fluency/48/instagram-new.png" alt="Instagram" width="20" height="20"/></a>`
+                                 : ''
+                             }
+                             ${
+                               vars.socialLinks.twitter
+                                 ? `<a href="${vars.socialLinks.twitter}" style="display: flex; align-items: center; justify-content: center; width: 40px; height: 40px; background: linear-gradient(145deg, #1a1a1a, #252525); border: 1px solid #333; border-radius: 50%; transition: all 0.3s ease;"><img src="https://img.icons8.com/fluency/48/twitter.png" alt="Twitter" width="20" height="20"/></a>`
+                                 : ''
+                             }
+                           </div>`
                         : ''
                     }
 
                     ${
                       vars.businessWebsite
-                        ? `<a href="${vars.businessWebsite}" style="display:inline-block; margin-top:16px; color:#6366f1; text-decoration:none; font-size:14px; font-weight:600;">Visit Our Website →</a>`
+                        ? `<a href="${vars.businessWebsite}" style="display: inline-block; margin-top: 16px; color: #00ff88; font-size: 13px; font-weight: 500; padding: 8px 16px; border: 1px solid #00ff8830; border-radius: 20px; background: #00ff8810; transition: all 0.3s ease;">Visit Website →</a>`
                         : ''
                     }
                   </td>
@@ -531,16 +519,16 @@ function getEmailHTML(vars) {
 
           <!-- Footer -->
           <tr>
-            <td style="padding:32px; background-color:#050505; text-align:center;">
-              <p style="margin:0 0 8px 0; color:#71717a; font-size:12px;">
-                This email was sent to ${vars.guestEmail} because you registered for ${vars.eventName}.
+            <td style="padding: 24px 40px; background: linear-gradient(145deg, #0a0a0a, #151515); border-top: 1px solid #222; text-align: center;">
+              <p style="margin: 0 0 8px 0; color: #666666; font-size: 11px; line-height: 1.4;">
+                This email was sent to ${vars.guestEmail} because you were identified in photos from ${vars.eventName}.
               </p>
-              <p style="margin:0; color:#52525b; font-size:11px;">
+              <p style="margin: 0 0 12px 0; color: #444444; font-size: 10px;">
                 © ${vars.currentYear} ${vars.businessName}. All rights reserved.
                 ${vars.businessAddress ? `<br/>${vars.businessAddress}` : ''}
               </p>
-              <p style="margin:16px 0 0 0; color:#3f3f46; font-size:10px;">
-                Powered by <a href="https://hapzea.com" style="color:#3f3f46; text-decoration:none;">Hapzea</a>
+              <p style="margin: 0; color: #333333; font-size: 9px; font-family: 'JetBrains Mono', monospace;">
+                Powered by <a href="https://hapzea.com" style="color: #00ff88; text-decoration: none;">HAPZEA</a> ⚡
               </p>
             </td>
           </tr>
@@ -555,24 +543,23 @@ function getEmailHTML(vars) {
 
 function generateTextVersion(vars) {
   return `
-Hi ${vars.guestName}!
+Hi ${vars.guestName}! 👋
 
 Great news! We found ${vars.photoCount} photo${vars.photoCount > 1 ? 's' : ''} of you from ${vars.eventName}.
 
-View your personal photo gallery: ${vars.galleryUrl}
-
-Match Statistics:
+🎯 Match Statistics:
 - Total photos found: ${vars.photoCount}
 - Best match accuracy: ${vars.bestSimilarity}%
 - Average match accuracy: ${vars.averageSimilarity}%
 
-If you have any questions, please contact us at ${vars.supportEmail}.
+📸 View your personal photo gallery: ${vars.galleryUrl}
+
+📞 Questions? Contact us at ${vars.supportEmail}
 
 Best regards,
-The ${vars.companyWebsite} Team
+The ${vars.businessName} Team
 
 ---
-Event ID: ${vars.eventId}
 Processed: ${vars.processedDate}
 `.trim();
 }
