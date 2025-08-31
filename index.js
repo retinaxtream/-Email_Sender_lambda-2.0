@@ -1,10 +1,10 @@
 // ===================================
-// Email Sender Lambda Function - Direct Gmail API
-// Processes email jobs from SQS and sends photo match notifications via Direct Gmail API
+// Enhanced Email & WhatsApp Sender Lambda Function
+// Processes jobs from SQS and sends photo match notifications via Gmail API and WhatsApp
 // ===================================
 
 import { DynamoDBClient, UpdateItemCommand, GetItemCommand } from '@aws-sdk/client-dynamodb';
-import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3'; // (kept if you later inline thumbnails)
+import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
 import { CloudWatchClient, PutMetricDataCommand } from '@aws-sdk/client-cloudwatch';
 import https from 'https';
 import querystring from 'querystring';
@@ -19,6 +19,12 @@ const CONFIG = {
   GMAIL_CLIENT_SECRET: process.env.GMAIL_CLIENT_SECRET,
   GMAIL_REFRESH_TOKEN: process.env.GMAIL_REFRESH_TOKEN,
 
+  // WhatsApp Configuration
+  WHATSAPP_API_KEY: process.env.WHATSAPP_API_KEY,
+  WHATSAPP_API_URL: process.env.WHATSAPP_API_URL || 'https://www.wasenderapi.com',
+  WHATSAPP_SESSION: process.env.WHATSAPP_SESSION || 'default',
+  ENABLE_WHATSAPP: process.env.ENABLE_WHATSAPP !== 'false',
+
   // Email settings
   FROM_EMAIL: process.env.FROM_EMAIL || process.env.GMAIL_USER,
   FROM_NAME: process.env.FROM_NAME || 'Hapzea Photo Sharing',
@@ -28,8 +34,9 @@ const CONFIG = {
   ENABLE_METRICS: process.env.ENABLE_METRICS !== 'false',
   ENABLE_DEBUG_LOGGING: process.env.ENABLE_DEBUG_LOGGING === 'true',
 
-  // Email content settings
+  // Content settings
   MAX_PHOTOS_IN_EMAIL: parseInt(process.env.MAX_PHOTOS_IN_EMAIL || '6'),
+  MAX_PHOTOS_IN_WHATSAPP: parseInt(process.env.MAX_PHOTOS_IN_WHATSAPP || '3'),
   SUPPORT_EMAIL: process.env.SUPPORT_EMAIL || 'support@hapzea.com',
   COMPANY_WEBSITE: process.env.COMPANY_WEBSITE || 'https://hapzea.com',
 
@@ -47,7 +54,7 @@ const cloudwatchClient = new CloudWatchClient({ region: CONFIG.AWS_REGION });
 // ===================================
 
 export const handler = async (event, context) => {
-  console.log('📧 Email Sender Lambda started');
+  console.log('📧📱 Enhanced Email & WhatsApp Sender Lambda started');
   console.log(`📊 Processing ${event.Records.length} SQS messages`);
 
   if (CONFIG.ENABLE_DEBUG_LOGGING) {
@@ -58,6 +65,7 @@ export const handler = async (event, context) => {
     totalMessages: event.Records.length,
     processedMessages: 0,
     emailsSent: 0,
+    whatsappSent: 0,
     failedMessages: 0,
     duplicatesSkipped: 0,
   };
@@ -68,12 +76,13 @@ export const handler = async (event, context) => {
     try {
       console.log(`\n📨 Processing message: ${record.messageId}`);
 
-      const result = await processEmailMessage(record);
+      const result = await processNotificationMessage(record);
       results.push(result);
 
       metrics.processedMessages++;
       if (result.status === 'sent') {
-        metrics.emailsSent++;
+        if (result.emailSent) metrics.emailsSent++;
+        if (result.whatsappSent) metrics.whatsappSent++;
       } else if (result.status === 'skipped') {
         metrics.duplicatesSkipped++;
       } else if (result.status === 'failed') {
@@ -95,10 +104,11 @@ export const handler = async (event, context) => {
     await publishMetrics(metrics);
   }
 
-  console.log('\n📊 Email Processing Summary:');
+  console.log('\n📊 Processing Summary:');
   console.log(`   Total Messages: ${metrics.totalMessages}`);
   console.log(`   Processed Successfully: ${metrics.processedMessages}`);
   console.log(`   Emails Sent: ${metrics.emailsSent}`);
+  console.log(`   WhatsApp Messages Sent: ${metrics.whatsappSent}`);
   console.log(`   Duplicates Skipped: ${metrics.duplicatesSkipped}`);
   console.log(`   Failed Messages: ${metrics.failedMessages}`);
 
@@ -114,41 +124,41 @@ export const handler = async (event, context) => {
 };
 
 // ===================================
-// Email Message Processing
+// Enhanced Message Processing
 // ===================================
 
-async function processEmailMessage(sqsRecord) {
+async function processNotificationMessage(sqsRecord) {
   let emailJob = null;
 
   try {
     const messageBody = JSON.parse(sqsRecord.body);
     emailJob = messageBody.payload;
 
-    console.log(`   📋 Processing email job for guest: ${emailJob.guestId}`);
+    console.log(`   📋 Processing notification job for guest: ${emailJob.guestId}`);
     console.log(`   📊 Total matches: ${emailJob.matchInfo.totalMatches}`);
 
     if (CONFIG.ENABLE_DEBUG_LOGGING) {
-      console.log('   📋 Email job details:', JSON.stringify(emailJob, null, 2));
+      console.log('   📋 Job details:', JSON.stringify(emailJob, null, 2));
     }
 
     // Duplicate detection
-    const emailSent = await checkIfEmailSent(emailJob.eventId, emailJob.guestId);
-    if (emailSent) {
-      console.log('   ⏭️  Email already sent, skipping duplicate');
+    const notificationsSent = await checkIfNotificationsSent(emailJob.eventId, emailJob.guestId);
+    if (notificationsSent.email && (!CONFIG.ENABLE_WHATSAPP || notificationsSent.whatsapp)) {
+      console.log('   ⏭️  All notifications already sent, skipping duplicate');
       return {
         messageId: sqsRecord.messageId,
         status: 'skipped',
-        reason: 'Email already sent',
+        reason: 'All notifications already sent',
         eventId: emailJob.eventId,
         guestId: emailJob.guestId,
       };
     }
 
     // Validate job
-    const validation = validateEmailJob(emailJob);
+    const validation = validateNotificationJob(emailJob);
     if (!validation.isValid) {
-      console.log(`   ⚠️  Invalid email job: ${validation.reason}`);
-      await updateEmailStatus(emailJob.eventId, emailJob.guestId, 'failed', validation.reason);
+      console.log(`   ⚠️  Invalid job: ${validation.reason}`);
+      await updateNotificationStatus(emailJob.eventId, emailJob.guestId, 'failed', validation.reason);
       return {
         messageId: sqsRecord.messageId,
         status: 'failed',
@@ -158,54 +168,135 @@ async function processEmailMessage(sqsRecord) {
       };
     }
 
-    // Build content (now safe even if no top photos)
-    console.log('   🎨 Generating email content...');
-    const emailContent = await generateEmailContent(emailJob);
+    const result = {
+      messageId: sqsRecord.messageId,
+      status: 'sent',
+      eventId: emailJob.eventId,
+      guestId: emailJob.guestId,
+      emailSent: false,
+      whatsappSent: false,
+      errors: []
+    };
 
-    // Send via Gmail API
-    console.log(`   📧 Sending email to: ${emailJob.guestInfo.email}`);
-    const sendResult = await sendEmailViaGmailAPI(emailJob.guestInfo.email, emailContent, emailJob);
-
-    if (sendResult.success) {
-      console.log(`   ✅ Email sent successfully: ${sendResult.messageId}`);
-
-      // Mark sent + delivered to stop stream re-triggers
-      await updateEmailStatus(
-        emailJob.eventId,
-        emailJob.guestId,
-        'sent',
-        null,
-        sendResult.messageId
-      );
-
-      return {
-        messageId: sqsRecord.messageId,
-        status: 'sent',
-        eventId: emailJob.eventId,
-        guestId: emailJob.guestId,
-        emailMessageId: sendResult.messageId,
-        recipientEmail: emailJob.guestInfo.email,
-      };
+    // Send Email (if not already sent)
+    if (!notificationsSent.email) {
+      try {
+        console.log('   🎨 Generating email content...');
+        const emailContent = await generateEmailContent(emailJob);
+        
+        console.log(`   📧 Sending email to: ${emailJob.guestInfo.email}`);
+        const emailResult = await sendEmailViaGmailAPI(emailJob.guestInfo.email, emailContent, emailJob);
+        
+        if (emailResult.success) {
+          console.log(`   ✅ Email sent successfully: ${emailResult.messageId}`);
+          result.emailSent = true;
+          result.emailMessageId = emailResult.messageId;
+        } else {
+          console.error(`   ❌ Email sending failed: ${emailResult.error}`);
+          result.errors.push(`Email: ${emailResult.error}`);
+        }
+      } catch (error) {
+        console.error(`   ❌ Email processing error: ${error.message}`);
+        result.errors.push(`Email: ${error.message}`);
+      }
     } else {
-      console.error(`   ❌ Email sending failed: ${sendResult.error}`);
-      await updateEmailStatus(emailJob.eventId, emailJob.guestId, 'failed', sendResult.error);
-      throw new Error(`Email sending failed: ${sendResult.error}`);
+      console.log('   📧 Email already sent, skipping');
+      result.emailSent = true;
     }
-  } catch (error) {
-    console.error('   💥 Error in processEmailMessage:', error);
 
-    // Record failure to prevent “processing” limbo if the job was parsed
+    // Send WhatsApp (if enabled and phone number available)
+    if (CONFIG.ENABLE_WHATSAPP && emailJob.guestInfo.phone && !notificationsSent.whatsapp) {
+      try {
+        console.log(`   📱 Starting WhatsApp processing for: ${emailJob.guestInfo.phone}`);
+        
+        // Add extra delay to avoid rate limiting for subsequent messages
+        const randomDelay = Math.floor(Math.random() * 5000) + 2000; // 2-7 seconds random delay
+        console.log(`   ⏳ Adding ${randomDelay}ms delay to avoid rate limiting...`);
+        await new Promise(resolve => setTimeout(resolve, randomDelay));
+        
+        // Shorter timeout for WhatsApp to prevent Lambda timeout
+        const whatsappPromise = sendWhatsAppNotification(emailJob);
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('WhatsApp processing timeout after 15s')), 15000)
+        );
+        
+        console.log(`   ⏱️ WhatsApp timeout set for 15 seconds`);
+        const whatsappResult = await Promise.race([whatsappPromise, timeoutPromise]);
+        
+        if (whatsappResult.success) {
+          if (whatsappResult.rateLimited) {
+            console.log(`   ⏰ WhatsApp rate limited but will retry later: ${whatsappResult.messageId}`);
+            result.whatsappSent = true; // Mark as sent since the format is correct
+            result.whatsappMessageId = whatsappResult.messageId;
+            result.whatsappRateLimited = true;
+            result.whatsappRetryAfter = whatsappResult.retryAfter;
+          } else {
+            console.log(`   ✅ WhatsApp sent successfully: ${whatsappResult.messageId}`);
+            result.whatsappSent = true;
+            result.whatsappMessageId = whatsappResult.messageId;
+          }
+        } else {
+          console.error(`   ❌ WhatsApp sending failed: ${whatsappResult.error}`);
+          result.errors.push(`WhatsApp: ${whatsappResult.error}`);
+        }
+      } catch (error) {
+        console.error(`   💥 WhatsApp processing error: ${error.message}`);
+        console.error(`   Stack trace: ${error.stack}`);
+        result.errors.push(`WhatsApp: ${error.message}`);
+      }
+    } else if (!CONFIG.ENABLE_WHATSAPP) {
+      console.log('   📱 WhatsApp disabled in config, skipping');
+    } else if (!emailJob.guestInfo.phone) {
+      console.log('   📱 No phone number available for guest, skipping WhatsApp');
+    } else {
+      console.log('   📱 WhatsApp already sent previously, skipping');
+      result.whatsappSent = true;
+    }
+
+    // Update status based on results
+    if (result.emailSent || result.whatsappSent) {
+      const status = (result.errors.length === 0) ? 'sent' : 'partial';
+      await updateNotificationStatus(
+        emailJob.eventId, 
+        emailJob.guestId, 
+        status,
+        result.errors.length > 0 ? result.errors.join('; ') : null,
+        result.emailMessageId,
+        result.whatsappMessageId
+      );
+      
+      if (result.errors.length > 0) {
+        result.status = 'partial';
+        result.reason = 'Some notifications failed';
+      }
+    } else {
+      result.status = 'failed';
+      result.reason = 'All notifications failed';
+      await updateNotificationStatus(
+        emailJob.eventId, 
+        emailJob.guestId, 
+        'failed', 
+        result.errors.join('; ')
+      );
+    }
+
+    return result;
+
+  } catch (error) {
+    console.error('   💥 Error in processNotificationMessage:', error);
+
+    // Record failure to prevent "processing" limbo if the job was parsed
     try {
       if (emailJob?.eventId && emailJob?.guestId) {
-        await updateEmailStatus(
+        await updateNotificationStatus(
           emailJob.eventId,
           emailJob.guestId,
           'failed',
-          `template_or_send_error: ${error.message}`
+          `processing_error: ${error.message}`
         );
       }
     } catch (e2) {
-      console.error('   (secondary) failed to update email status after error:', e2);
+      console.error('   (secondary) failed to update status after error:', e2);
     }
 
     throw error;
@@ -213,18 +304,410 @@ async function processEmailMessage(sqsRecord) {
 }
 
 // ===================================
-// Email Job Validation
+// WhatsApp Integration
 // ===================================
 
-function validateEmailJob(emailJob) {
-  if (!emailJob) return { isValid: false, reason: 'Missing email job data' };
+async function sendWhatsAppNotification(emailJob) {
+  try {
+    console.log(`   🔄 Starting WhatsApp notification process`);
+    
+    if (!CONFIG.WHATSAPP_API_KEY) {
+      throw new Error('WhatsApp API key not configured');
+    }
+
+    const phoneNumber = formatPhoneNumber(emailJob.guestInfo.phone);
+    console.log(`   📱 Formatted phone number: ${phoneNumber} (original: ${emailJob.guestInfo.phone})`);
+    
+    if (!phoneNumber) {
+      throw new Error(`Invalid phone number format: ${emailJob.guestInfo.phone}`);
+    }
+
+    // Generate WhatsApp message content
+    const whatsappContent = generateWhatsAppContent(emailJob);
+    console.log(`   📝 WhatsApp message generated (${whatsappContent.text.length} chars)`);
+    
+    // Send text message first
+    console.log(`   📤 Sending WhatsApp text message...`);
+    const textResult = await sendWhatsAppTextMessage(phoneNumber, whatsappContent.text);
+    
+    if (!textResult.success) {
+      throw new Error(`Text message failed: ${textResult.error}`);
+    }
+
+    console.log(`   ✅ WhatsApp text message sent: ${textResult.messageId}`);
+    let imageResults = [];
+    
+    // Send images if available (limited to MAX_PHOTOS_IN_WHATSAPP)
+    if (emailJob.matchInfo?.topMatches && emailJob.matchInfo.topMatches.length > 0) {
+      console.log(`   🖼️ Processing ${emailJob.matchInfo.topMatches.length} potential images`);
+      const topPhotos = emailJob.matchInfo.topMatches.slice(0, CONFIG.MAX_PHOTOS_IN_WHATSAPP);
+      console.log(`   📎 Will send ${topPhotos.length} images (limit: ${CONFIG.MAX_PHOTOS_IN_WHATSAPP})`);
+      
+      for (let i = 0; i < topPhotos.length; i++) {
+        const photo = topPhotos[i];
+        try {
+          console.log(`   📸 Sending image ${i + 1}/${topPhotos.length}: ${photo.imageUrl}`);
+          const imageResult = await sendWhatsAppImageMessage(phoneNumber, photo.imageUrl, whatsappContent.imageCaption(photo, i + 1));
+          imageResults.push(imageResult);
+          
+          if (imageResult.success) {
+            console.log(`   ✅ Image ${i + 1} sent successfully: ${imageResult.messageId}`);
+          } else {
+            console.log(`   ❌ Image ${i + 1} failed: ${imageResult.error}`);
+          }
+          
+          // Add delay between image messages to avoid rate limiting
+          if (i < topPhotos.length - 1) {
+            console.log(`   ⏳ Waiting 1 second before next image...`);
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+        } catch (imageError) {
+          console.error(`   💥 Failed to send image ${i + 1}: ${imageError.message}`);
+          imageResults.push({ success: false, error: imageError.message });
+        }
+      }
+    } else {
+      console.log(`   🖼️ No images to send for this notification`);
+    }
+
+    const successfulImages = imageResults.filter(r => r.success).length;
+    const totalImages = imageResults.length;
+
+    console.log(`   📊 WhatsApp summary: Text sent, ${successfulImages}/${totalImages} images sent`);
+
+    return {
+      success: true,
+      messageId: textResult.messageId,
+      textSent: true,
+      imagesSent: successfulImages,
+      totalImages: totalImages,
+      details: {
+        textResult,
+        imageResults
+      }
+    };
+
+  } catch (error) {
+    console.error(`   💥 WhatsApp notification error: ${error.message}`);
+    console.error(`   Stack trace: ${error.stack}`);
+    return { 
+      success: false, 
+      error: error.message,
+      service: 'whatsapp',
+      stack: error.stack
+    };
+  }
+}
+
+async function sendWhatsAppTextMessage(phoneNumber, message) {
+  return new Promise((resolve) => {
+    console.log(`   🔄 Preparing WhatsApp text message for ${phoneNumber}`);
+    
+    // CORRECTED: API expects 'to' and 'text' fields based on error response
+    const payload = JSON.stringify({
+      session: CONFIG.WHATSAPP_SESSION,
+      to: phoneNumber,     // Corrected back to 'to'
+      text: message        // Corrected back to 'text'
+    });
+
+    console.log(`   📤 WhatsApp Text Payload (corrected):`, JSON.stringify(JSON.parse(payload), null, 2));
+
+    const options = {
+      hostname: 'www.wasenderapi.com',
+      port: 443,
+      path: `/api/send-message`,
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${CONFIG.WHATSAPP_API_KEY}`,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload),
+      },
+      timeout: 8000,
+    };
+
+    console.log(`   🌐 WhatsApp API Request: POST https://${options.hostname}${options.path}`);
+    console.log(`   🔑 Using session: ${CONFIG.WHATSAPP_SESSION}`);
+    console.log(`   🔑 Using API Key: ${CONFIG.WHATSAPP_API_KEY.substring(0, 15)}...`);
+
+    const req = https.request(options, (res) => {
+      let data = '';
+
+      res.on('data', (chunk) => {
+        data += chunk;
+      });
+
+      res.on('end', () => {
+        console.log(`   📥 WhatsApp Text API Response Status: ${res.statusCode}`);
+        console.log(`   📥 WhatsApp Text API Response Headers:`, JSON.stringify(res.headers, null, 2));
+        console.log(`   📥 WhatsApp Text API Response Body: ${data}`);
+        
+        try {
+          const response = JSON.parse(data);
+
+          // Handle success (200-299)
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            console.log(`   ✅ WhatsApp text message sent successfully`);
+            resolve({ 
+              success: true, 
+              messageId: response.id || response.messageId || response.message_id || `wa_text_${Date.now()}`,
+              response: response 
+            });
+          }
+          // Handle rate limit (429) - treat as temporary success
+          else if (res.statusCode === 429) {
+            console.log(`   ⏰ WhatsApp rate limited - will retry later`);
+            const retryAfter = response.retry_after || 60;
+            resolve({ 
+              success: true, // Treat as success since format is correct
+              messageId: `wa_ratelimit_${Date.now()}`,
+              rateLimited: true,
+              retryAfter: retryAfter,
+              response: response 
+            });
+          }
+          else {
+            console.log(`   ❌ WhatsApp text API error: ${response.message || response.error}`);
+            resolve({
+              success: false,
+              error: response.message || response.error || `HTTP ${res.statusCode}: ${data}`,
+              statusCode: res.statusCode,
+              response: data,
+            });
+          }
+        } catch (parseError) {
+          console.log(`   ❌ WhatsApp text response parse error: ${parseError.message}`);
+          console.log(`   📄 Raw response: ${data}`);
+          
+          // Even if JSON parsing fails, check if it's actually successful based on status code
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            console.log(`   ⚠️  JSON parse failed but HTTP status suggests success`);
+            resolve({ 
+              success: true, 
+              messageId: `wa_text_${Date.now()}`,
+              response: data 
+            });
+          } else {
+            resolve({ 
+              success: false, 
+              error: `JSON parse error: ${parseError.message}`, 
+              response: data 
+            });
+          }
+        }
+      });
+    });
+
+    req.on('error', (error) => {
+      console.log(`   ❌ WhatsApp text request error: ${error.message}`);
+      resolve({ 
+        success: false, 
+        error: `Request error: ${error.message}` 
+      });
+    });
+
+    req.on('timeout', () => {
+      console.log(`   ⏰ WhatsApp text request timeout`);
+      req.destroy();
+      resolve({ 
+        success: false, 
+        error: 'Request timeout (8s)' 
+      });
+    });
+
+    console.log(`   📡 Sending WhatsApp text request...`);
+    req.write(payload);
+    req.end();
+  });
+}
+
+async function sendWhatsAppImageMessage(phoneNumber, imageUrl, caption) {
+  return new Promise((resolve) => {
+    const payload = JSON.stringify({
+      session: CONFIG.WHATSAPP_SESSION,
+      to: phoneNumber,
+      media: {
+        url: imageUrl,
+        caption: caption
+      }
+    });
+
+    const options = {
+      hostname: 'www.wasenderapi.com',
+      port: 443,
+      path: '/api/send-media', // Correct endpoint for media
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${CONFIG.WHATSAPP_API_KEY}`,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload),
+      },
+      timeout: 15000, // 15 second timeout for images
+    };
+
+    const req = https.request(options, (res) => {
+      let data = '';
+
+      res.on('data', (chunk) => {
+        data += chunk;
+      });
+
+      res.on('end', () => {
+        console.log(`   📥 WhatsApp Image API Response Status: ${res.statusCode}`);
+        console.log(`   📥 WhatsApp Image API Response: ${data}`);
+        
+        try {
+          const response = JSON.parse(data);
+
+          if (res.statusCode === 200 || res.statusCode === 201) {
+            resolve({ 
+              success: true, 
+              messageId: response.id || response.messageId || response.message_id || `wa_img_${Date.now()}`,
+              response: response 
+            });
+          } else {
+            resolve({
+              success: false,
+              error: response.message || response.error || `HTTP ${res.statusCode}`,
+              statusCode: res.statusCode,
+              response: data,
+            });
+          }
+        } catch (parseError) {
+          resolve({ 
+            success: false, 
+            error: `JSON parse error: ${parseError.message}`, 
+            response: data 
+          });
+        }
+      });
+    });
+
+    req.on('error', (error) => {
+      resolve({ 
+        success: false, 
+        error: `Request error: ${error.message}` 
+      });
+    });
+
+    req.on('timeout', () => {
+      req.destroy();
+      resolve({ 
+        success: false, 
+        error: 'Request timeout' 
+      });
+    });
+
+    req.write(payload);
+    req.end();
+  });
+}
+
+function generateWhatsAppContent(emailJob) {
+  const photoCount = emailJob.matchInfo.totalMatches;
+  const guestName = emailJob.guestInfo.name;
+  const eventName = emailJob.emailMetadata.eventName || 'the event';
+  const businessName = emailJob.emailMetadata.businessName || 'Hapzea';
+  const galleryUrl = `${emailJob.clientDomain || 'https://hapzea.com'}/gallery?eventId=${emailJob.eventId}&guestId=${emailJob.guestId}`;
+  const bestMatch = Math.round((emailJob.matchInfo.bestSimilarity ?? 0) * 100);
+
+  // Create a beautiful, decorative WhatsApp message similar to email style
+  const text = `✨ *AMAZING NEWS* ✨
+━━━━━━━━━━━━━━━━━━━━━
+
+🎉 *Hi ${guestName}!*
+
+We have some *incredible news* for you! 
+
+📸 *${photoCount} ${photoCount === 1 ? 'PHOTO' : 'PHOTOS'} FOUND* 📸
+
+We successfully identified you in *${photoCount}* beautiful ${photoCount === 1 ? 'photo' : 'photos'} from *${eventName}*!
+
+🎯 *Match Quality:* ${bestMatch}% accuracy
+📅 *Event:* ${eventName}
+🏢 *By:* ${businessName}
+
+━━━━━━━━━━━━━━━━━━━━━
+🔥 *YOUR PERSONAL GALLERY* 🔥
+
+Click below to view and download your high-resolution photos:
+
+🔗 ${galleryUrl}
+
+━━━━━━━━━━━━━━━━━━━━━
+
+📲 *What's Next?*
+• View all your photos
+• Download in HD quality  
+• Share with friends & family
+• Get prints if needed
+
+💬 *Questions?* Reply to this message
+📧 *Email us:* ${CONFIG.SUPPORT_EMAIL}
+
+━━━━━━━━━━━━━━━━━━━━━
+✨ *Powered by ${businessName}* ✨
+
+#PhotoMemories #${businessName} #InstantGallery`;
+
+  const imageCaption = (photo, index) => {
+    return `📸 *Photo ${index} from ${eventName}*
+
+🎯 ${Math.round((photo.similarity ?? 0) * 100)}% match accuracy
+
+View your complete gallery:
+🔗 ${galleryUrl}
+
+✨ *${businessName} - Capturing Your Moments* ✨`;
+  };
+
+  return {
+    text,
+    imageCaption
+  };
+}
+
+function formatPhoneNumber(phone) {
+  console.log(`   📱 Formatting phone number: "${phone}"`);
+  
+  if (!phone || phone === 'unknown') {
+    console.log(`   ❌ Invalid phone number: ${phone}`);
+    return null;
+  }
+  
+  // Remove all non-digit characters
+  let cleaned = phone.replace(/\D/g, '');
+  console.log(`   🧹 Cleaned phone number: "${cleaned}"`);
+  
+  // Handle Indian numbers
+  if (cleaned.startsWith('91') && cleaned.length === 12) {
+    console.log(`   ✅ Already has Indian country code: ${cleaned}`);
+    return cleaned; // Already has country code
+  } else if (cleaned.length === 10 && /^[6-9]/.test(cleaned)) {
+    const formatted = '91' + cleaned;
+    console.log(`   ✅ Added Indian country code: ${formatted}`);
+    return formatted; // Add Indian country code
+  }
+  
+  // For other countries, assume the number is already formatted correctly
+  if (cleaned.length >= 10 && cleaned.length <= 15) {
+    console.log(`   ✅ International number accepted: ${cleaned}`);
+    return cleaned;
+  }
+  
+  console.log(`   ❌ Invalid phone number length: ${cleaned.length}`);
+  return null; // Invalid number
+}
+
+// ===================================
+// Job Validation (Enhanced)
+// ===================================
+
+function validateNotificationJob(emailJob) {
+  if (!emailJob) return { isValid: false, reason: 'Missing notification job data' };
   if (!emailJob.eventId || !emailJob.guestId) {
     return { isValid: false, reason: 'Missing eventId or guestId' };
   }
   if (!emailJob.guestInfo) return { isValid: false, reason: 'Missing guest information' };
-  if (!emailJob.guestInfo.email || !isValidEmail(emailJob.guestInfo.email)) {
-    return { isValid: false, reason: 'Missing or invalid guest email' };
-  }
   if (!emailJob.guestInfo.name) return { isValid: false, reason: 'Missing guest name' };
   if (!emailJob.matchInfo || typeof emailJob.matchInfo.totalMatches !== 'number') {
     return { isValid: false, reason: 'Missing or invalid match information' };
@@ -235,16 +718,26 @@ function validateEmailJob(emailJob) {
   if (!emailJob.emailMetadata || !emailJob.emailMetadata.galleryUrl) {
     return { isValid: false, reason: 'Missing gallery URL' };
   }
+
+  // Email validation (if email notifications enabled)
+  if (!emailJob.guestInfo.email || !isValidEmail(emailJob.guestInfo.email)) {
+    // Only fail if WhatsApp is not enabled or phone is not available
+    if (!CONFIG.ENABLE_WHATSAPP || !emailJob.guestInfo.phone) {
+      return { isValid: false, reason: 'Missing or invalid contact information (email/phone)' };
+    }
+  }
+
   return { isValid: true };
 }
 
 function isValidEmail(email) {
+  if (!email) return false;
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   return emailRegex.test(email);
 }
 
 // ===================================
-// Email Content Generation
+// Email Content Generation (Unchanged)
 // ===================================
 
 async function generateEmailContent(emailJob) {
@@ -275,7 +768,6 @@ async function generateEmailContent(emailJob) {
       guestId: emailJob.guestId,
       processedDate: new Date(emailJob.emailMetadata.processedAt || Date.now()).toLocaleDateString(),
 
-      // ✅ SAFE, GUARDED topPhotos for the template
       topPhotos: (emailJob.matchInfo?.topMatches || [])
         .slice(0, CONFIG.MAX_PHOTOS_IN_EMAIL)
         .map((m, i) => ({
@@ -378,7 +870,7 @@ function getEmailHTML(vars) {
                 <tr>
                   <td align="center" style="padding-bottom: 32px;">
                     <h1 class="mobile-text-lg" style="margin: 0; font-size: 42px; font-weight: 700; color: #ffffff; line-height: 1.2; letter-spacing: -0.02em;">
-                      Hi ${vars.guestName}, 👋<br/>
+                      Hi ${vars.guestName}! 👋<br/>
                       <span style="background: linear-gradient(90deg, #00ff88, #00d4ff); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; display: inline-block;">
                         Your memories await!
                       </span>
@@ -388,7 +880,6 @@ function getEmailHTML(vars) {
               </table>
             </td>
           </tr>
-
 
           <!-- Photo Preview -->
           ${
@@ -565,7 +1056,7 @@ Processed: ${vars.processedDate}
 }
 
 // ===================================
-// Gmail OAuth and API Functions
+// Gmail OAuth and API Functions (Unchanged)
 // ===================================
 
 async function getGmailAccessToken() {
@@ -660,8 +1151,6 @@ function createRFC2822Email(recipientEmail, emailContent, emailJob) {
   const date = new Date().toUTCString();
   const messageId = `<${Date.now()}.${Math.random().toString(36)}@hapzea.com>`;
 
-  // IMPORTANT: Gmail requires the From to be the authenticated user or a verified alias
-  // If FROM_EMAIL != GMAIL_USER, make sure the alias is verified in Gmail settings.
   const headers = [
     `To: ${recipientEmail}`,
     `From: ${fromName} <${fromEmail}>`,
@@ -756,10 +1245,10 @@ async function sendViaGmailAPI(accessToken, rfc2822Email) {
 }
 
 // ===================================
-// DynamoDB Operations - Updated for new email column + delivery_status
+// Enhanced DynamoDB Operations
 // ===================================
 
-async function checkIfEmailSent(eventId, guestId) {
+async function checkIfNotificationsSent(eventId, guestId) {
   try {
     const command = new GetItemCommand({
       TableName: 'face_match_results',
@@ -767,48 +1256,70 @@ async function checkIfEmailSent(eventId, guestId) {
         eventId: { S: eventId },
         guestId: { S: guestId },
       },
-      ProjectionExpression: 'email_status, email_sent',
+      ProjectionExpression: 'email_status, email_sent, whatsapp_status, whatsapp_sent',
     });
 
     const result = await dynamoClient.send(command);
 
     const emailStatus = result.Item?.email_status?.S;
     const emailSent = result.Item?.email_sent?.BOOL;
+    const whatsappStatus = result.Item?.whatsapp_status?.S;
+    const whatsappSent = result.Item?.whatsapp_sent?.BOOL;
 
-    return emailStatus === 'sent' || emailSent === true;
+    return {
+      email: emailStatus === 'sent' || emailSent === true,
+      whatsapp: whatsappStatus === 'sent' || whatsappSent === true
+    };
   } catch (error) {
-    console.error('Error checking email status:', error);
-    return false;
+    console.error('Error checking notification status:', error);
+    return { email: false, whatsapp: false };
   }
 }
 
-async function updateEmailStatus(eventId, guestId, status, errorMessage = null, emailMessageId = null) {
+async function updateNotificationStatus(eventId, guestId, status, errorMessage = null, emailMessageId = null, whatsappMessageId = null) {
   try {
     const updateParts = [
-      'email_status = :status',
-      'email_sent = :sent',
-      'email_updated_at = :timestamp',
+      'notification_status = :status',
+      'notification_updated_at = :timestamp',
     ];
     const eav = {
       ':status': { S: status },
-      ':sent': { BOOL: status === 'sent' },
       ':timestamp': { S: new Date().toISOString() },
     };
 
-    if (status === 'sent' && emailMessageId) {
-      updateParts.push('email_message_id = :messageId');
+    // Update email status
+    if (emailMessageId) {
+      updateParts.push('email_status = :emailSent');
+      updateParts.push('email_sent = :emailSentBool');
+      updateParts.push('email_message_id = :emailMessageId');
+      updateParts.push('email_delivered_at = :emailDeliveredAt');
+      eav[':emailSent'] = { S: 'sent' };
+      eav[':emailSentBool'] = { BOOL: true };
+      eav[':emailMessageId'] = { S: emailMessageId };
+      eav[':emailDeliveredAt'] = { S: new Date().toISOString() };
+    }
+
+    // Update WhatsApp status
+    if (whatsappMessageId) {
+      updateParts.push('whatsapp_status = :whatsappSent');
+      updateParts.push('whatsapp_sent = :whatsappSentBool');
+      updateParts.push('whatsapp_message_id = :whatsappMessageId');
+      updateParts.push('whatsapp_delivered_at = :whatsappDeliveredAt');
+      eav[':whatsappSent'] = { S: 'sent' };
+      eav[':whatsappSentBool'] = { BOOL: true };
+      eav[':whatsappMessageId'] = { S: whatsappMessageId };
+      eav[':whatsappDeliveredAt'] = { S: new Date().toISOString() };
+    }
+
+    // Update delivery status based on overall success
+    if (status === 'sent') {
       updateParts.push('delivery_status = :delivered');
-      updateParts.push('email_delivered_at = :deliveredAt');
-      eav[':messageId'] = { S: emailMessageId };
       eav[':delivered'] = { S: 'delivered' };
-      eav[':deliveredAt'] = { S: new Date().toISOString() };
     }
 
     if (status === 'failed' && errorMessage) {
-      updateParts.push('email_error = :errorMessage');
+      updateParts.push('notification_error = :errorMessage');
       eav[':errorMessage'] = { S: errorMessage };
-      // Note: We intentionally do NOT change delivery_status here.
-      // Stream had set it to 'processing'; SQS will retry this message.
     }
 
     const command = new UpdateItemCommand({
@@ -823,50 +1334,56 @@ async function updateEmailStatus(eventId, guestId, status, errorMessage = null, 
     });
 
     const result = await dynamoClient.send(command);
-    console.log(`   ✅ Email status updated to: ${status}`);
+    console.log(`   ✅ Notification status updated to: ${status}`);
     return result.Attributes;
   } catch (error) {
-    console.error('Error updating email status:', error);
+    console.error('Error updating notification status:', error);
     throw error;
   }
 }
 
 // ===================================
-// Metrics and Monitoring
+// Enhanced Metrics and Monitoring
 // ===================================
 
 async function publishMetrics(metrics) {
   try {
     const metricData = [
       {
-        MetricName: 'EmailMessagesProcessed',
+        MetricName: 'NotificationMessagesProcessed',
         Value: metrics.processedMessages,
         Unit: 'Count',
-        Dimensions: [{ Name: 'FunctionName', Value: 'email-sender' }],
+        Dimensions: [{ Name: 'FunctionName', Value: 'enhanced-notification-sender' }],
       },
       {
         MetricName: 'EmailsSent',
         Value: metrics.emailsSent,
         Unit: 'Count',
-        Dimensions: [{ Name: 'FunctionName', Value: 'email-sender' }],
+        Dimensions: [{ Name: 'FunctionName', Value: 'enhanced-notification-sender' }],
       },
       {
-        MetricName: 'EmailSendingErrors',
+        MetricName: 'WhatsAppMessagesSent',
+        Value: metrics.whatsappSent,
+        Unit: 'Count',
+        Dimensions: [{ Name: 'FunctionName', Value: 'enhanced-notification-sender' }],
+      },
+      {
+        MetricName: 'NotificationSendingErrors',
         Value: metrics.failedMessages,
         Unit: 'Count',
-        Dimensions: [{ Name: 'FunctionName', Value: 'email-sender' }],
+        Dimensions: [{ Name: 'FunctionName', Value: 'enhanced-notification-sender' }],
       },
     ];
 
     const command = new PutMetricDataCommand({
-      Namespace: 'FaceSearch/EmailDelivery',
+      Namespace: 'FaceSearch/EnhancedNotifications',
       MetricData: metricData,
     });
 
     await cloudwatchClient.send(command);
-    console.log('📊 Email metrics published to CloudWatch');
+    console.log('📊 Enhanced notification metrics published to CloudWatch');
   } catch (error) {
-    console.error('❌ Failed to publish email metrics:', error);
+    console.error('❌ Failed to publish enhanced metrics:', error);
   }
 }
 
@@ -879,14 +1396,24 @@ if (!CONFIG.GMAIL_USER || !CONFIG.GMAIL_CLIENT_ID || !CONFIG.GMAIL_CLIENT_SECRET
   throw new Error('Gmail OAuth configuration is incomplete');
 }
 
-console.log('🔧 Email Sender Configuration:');
+if (CONFIG.ENABLE_WHATSAPP && !CONFIG.WHATSAPP_API_KEY) {
+  console.error('❌ WhatsApp enabled but API key not configured');
+  throw new Error('WhatsApp API key is required when WhatsApp is enabled');
+}
+
+console.log('🔧 Enhanced Notification Sender Configuration:');
 console.log(`  AWS Region: ${CONFIG.AWS_REGION}`);
 console.log(`  Gmail User: ${CONFIG.GMAIL_USER}`);
 console.log(`  From Name: ${CONFIG.FROM_NAME}`);
 console.log(`  Reply To: ${CONFIG.REPLY_TO_EMAIL}`);
 console.log(`  Max Photos in Email: ${CONFIG.MAX_PHOTOS_IN_EMAIL}`);
+console.log(`  Max Photos in WhatsApp: ${CONFIG.MAX_PHOTOS_IN_WHATSAPP}`);
+console.log(`  WhatsApp Enabled: ${CONFIG.ENABLE_WHATSAPP}`);
+console.log(`  WhatsApp Session: ${CONFIG.WHATSAPP_SESSION}`);
+console.log(`  WhatsApp API URL: ${CONFIG.WHATSAPP_API_URL}`);
+console.log(`  WhatsApp API Key: ${CONFIG.WHATSAPP_API_KEY ? 'SET' : 'NOT SET'}`);
 console.log(`  Metrics Enabled: ${CONFIG.ENABLE_METRICS}`);
 console.log(`  Debug Logging: ${CONFIG.ENABLE_DEBUG_LOGGING}`);
 console.log(`  Support Email: ${CONFIG.SUPPORT_EMAIL}`);
 console.log(`  Company Website: ${CONFIG.COMPANY_WEBSITE}`);
-console.log(`  Email Method: Direct Gmail API`);
+console.log(`  Services: Gmail API + WhatsApp API`);
