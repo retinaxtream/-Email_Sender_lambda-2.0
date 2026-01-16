@@ -1276,53 +1276,132 @@ async function checkIfNotificationsSent(eventId, guestId) {
   }
 }
 
+// async function updateNotificationStatus(eventId, guestId, status, errorMessage = null, emailMessageId = null, whatsappMessageId = null) {
+//   try {
+//     const updateParts = [
+//       'notification_status = :status',
+//       'notification_updated_at = :timestamp',
+//     ];
+//     const eav = {
+//       ':status': { S: status },
+//       ':timestamp': { S: new Date().toISOString() },
+//     };
+
+//     // Update email status
+//     if (emailMessageId) {
+//       updateParts.push('email_status = :emailSent');
+//       updateParts.push('email_sent = :emailSentBool');
+//       updateParts.push('email_message_id = :emailMessageId');
+//       updateParts.push('email_delivered_at = :emailDeliveredAt');
+//       eav[':emailSent'] = { S: 'sent' };
+//       eav[':emailSentBool'] = { BOOL: true };
+//       eav[':emailMessageId'] = { S: emailMessageId };
+//       eav[':emailDeliveredAt'] = { S: new Date().toISOString() };
+//     }
+
+//     // Update WhatsApp status
+//     if (whatsappMessageId) {
+//       updateParts.push('whatsapp_status = :whatsappSent');
+//       updateParts.push('whatsapp_sent = :whatsappSentBool');
+//       updateParts.push('whatsapp_message_id = :whatsappMessageId');
+//       updateParts.push('whatsapp_delivered_at = :whatsappDeliveredAt');
+//       eav[':whatsappSent'] = { S: 'sent' };
+//       eav[':whatsappSentBool'] = { BOOL: true };
+//       eav[':whatsappMessageId'] = { S: whatsappMessageId };
+//       eav[':whatsappDeliveredAt'] = { S: new Date().toISOString() };
+//     }
+
+//     // Update delivery status based on overall success
+//     if (status === 'sent') {
+//       updateParts.push('delivery_status = :delivered');
+//       eav[':delivered'] = { S: 'delivered' };
+//     }
+
+//     if (status === 'failed' && errorMessage) {
+//       updateParts.push('notification_error = :errorMessage');
+//       eav[':errorMessage'] = { S: errorMessage };
+//     }
+
+//     const command = new UpdateItemCommand({
+//       TableName: 'face_match_results',
+//       Key: {
+//         eventId: { S: eventId },
+//         guestId: { S: guestId },
+//       },
+//       UpdateExpression: `SET ${updateParts.join(', ')}`,
+//       ExpressionAttributeValues: eav,
+//       ReturnValues: 'ALL_NEW',
+//     });
+
+//     const result = await dynamoClient.send(command);
+//     console.log(`   ✅ Notification status updated to: ${status}`);
+//     return result.Attributes;
+//   } catch (error) {
+//     console.error('Error updating notification status:', error);
+//     throw error;
+//   }
+// }
+
 async function updateNotificationStatus(eventId, guestId, status, errorMessage = null, emailMessageId = null, whatsappMessageId = null) {
   try {
     const updateParts = [
       'notification_status = :status',
       'notification_updated_at = :timestamp',
     ];
+
     const eav = {
       ':status': { S: status },
       ':timestamp': { S: new Date().toISOString() },
     };
 
-    // Update email status
+    let conditionExpression = null;
+
+    // ---------------------------
+    // EMAIL SENT → Mark delivered
+    // ---------------------------
     if (emailMessageId) {
       updateParts.push('email_status = :emailSent');
       updateParts.push('email_sent = :emailSentBool');
       updateParts.push('email_message_id = :emailMessageId');
       updateParts.push('email_delivered_at = :emailDeliveredAt');
+
+      // CRITICAL FIX: Immediately mark as delivered to prevent duplicate emails
+      updateParts.push('delivery_status = :delivered');
+
       eav[':emailSent'] = { S: 'sent' };
       eav[':emailSentBool'] = { BOOL: true };
       eav[':emailMessageId'] = { S: emailMessageId };
       eav[':emailDeliveredAt'] = { S: new Date().toISOString() };
+      eav[':delivered'] = { S: 'delivered' };
+
+      // ATOMIC UPDATE: Only update if email was not already sent
+      // This prevents race conditions from duplicate stream events
+      conditionExpression = 'attribute_not_exists(email_sent) OR email_sent = :false';
+      eav[':false'] = { BOOL: false };
+
+      console.log(`   🔒 ATOMIC: Updating with condition - email not already sent`);
     }
 
-    // Update WhatsApp status
+    // WhatsApp status
     if (whatsappMessageId) {
       updateParts.push('whatsapp_status = :whatsappSent');
       updateParts.push('whatsapp_sent = :whatsappSentBool');
       updateParts.push('whatsapp_message_id = :whatsappMessageId');
       updateParts.push('whatsapp_delivered_at = :whatsappDeliveredAt');
+
       eav[':whatsappSent'] = { S: 'sent' };
       eav[':whatsappSentBool'] = { BOOL: true };
       eav[':whatsappMessageId'] = { S: whatsappMessageId };
       eav[':whatsappDeliveredAt'] = { S: new Date().toISOString() };
     }
 
-    // Update delivery status based on overall success
-    if (status === 'sent') {
-      updateParts.push('delivery_status = :delivered');
-      eav[':delivered'] = { S: 'delivered' };
-    }
-
+    // For failed jobs
     if (status === 'failed' && errorMessage) {
       updateParts.push('notification_error = :errorMessage');
       eav[':errorMessage'] = { S: errorMessage };
     }
 
-    const command = new UpdateItemCommand({
+    const commandParams = {
       TableName: 'face_match_results',
       Key: {
         eventId: { S: eventId },
@@ -1331,16 +1410,34 @@ async function updateNotificationStatus(eventId, guestId, status, errorMessage =
       UpdateExpression: `SET ${updateParts.join(', ')}`,
       ExpressionAttributeValues: eav,
       ReturnValues: 'ALL_NEW',
-    });
+    };
 
-    const result = await dynamoClient.send(command);
-    console.log(`   ✅ Notification status updated to: ${status}`);
-    return result.Attributes;
+    // Add condition expression if we're sending email (to prevent duplicates)
+    if (conditionExpression) {
+      commandParams.ConditionExpression = conditionExpression;
+    }
+
+    const command = new UpdateItemCommand(commandParams);
+
+    try {
+      const result = await dynamoClient.send(command);
+      console.log(`   ✅ Notification status updated to: ${status}`);
+      return result.Attributes;
+    } catch (error) {
+      if (error.name === 'ConditionalCheckFailedException') {
+        console.log(`   ⚠️  Email was already sent by another process (race condition prevented)`);
+        // This is actually a success - email was already sent, so we don't need to send again
+        return null;
+      }
+      throw error;
+    }
+
   } catch (error) {
     console.error('Error updating notification status:', error);
     throw error;
   }
 }
+
 
 // ===================================
 // Enhanced Metrics and Monitoring
